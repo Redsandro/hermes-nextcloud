@@ -1,6 +1,8 @@
 # hermes-nextcloud
 
-![hermes-nextcloud](NC_Hermes.png)
+<p align="center">
+  <img src="NC_Hermes.png" alt="hermes-nextcloud" width="400"/>
+</p>
 
 Connect your self-hosted Nextcloud instance to Hermes Agent. Manage files, notes, calendar events, tasks, and contacts directly from any conversation. No plugins, no external services, just your data.
 
