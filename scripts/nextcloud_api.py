@@ -1038,7 +1038,7 @@ def cmd_calendar_create(env, summary, start, end, calendar=None, location=None, 
         selected_cal = calendars[0]
 
     cal_href = selected_cal["href"].rstrip("/")
-    # href is like /remote.php/dav/calendars/ADNW/personal/ -> use href directly
+    # href is like /remote.php/dav/calendars/{user}/personal/ -> use href directly
 
     uid = f"hermes-{datetime.now(timezone.utc).strftime('%Y%m%d%H%M%S')}-{os.urandom(4).hex()}"
     tzid = env.get("NEXTCLOUD_TIMEZONE", "UTC")
@@ -1173,8 +1173,8 @@ def cmd_addressbooks_list(env):
         # Addressbooks are under /addressbooks/ and have displayname or specific path patterns
         if "/addressbooks/" in href:
             name = r.get("displayname") or href.split("/")[-1].rstrip("/")
-            # Skip the parent /addressbooks/users/ADNW/ directory itself
-            if name == "ADNW" or name == "users":
+            # Skip the parent /addressbooks/users/{user}/ directory itself
+            if name == "users":
                 continue
             formatted.append({
                 "id": href.split("/")[-1].rstrip("/"),
