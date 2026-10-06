@@ -71,12 +71,13 @@ $NC notes delete --id 12
 
 Times without an offset are in the user's timezone (`NEXTCLOUD_TIMEZONE`). Use
 `YYYY-MM-DD HH:MM`, `YYYY-MM-DD` for all-day, or relative: `today`, `tomorrow`,
-`+3` (days), also with a time: `tomorrow 14:00`.
+`+90` / `-365` (days from today), also with a time: `tomorrow 14:00`.
 
 ```bash
 $NC calendars list --type events
 $NC calendar search --query meeting --on tomorrow     # title/location/description
-$NC calendar search --query dentist                   # default: today .. +90 days
+$NC calendar search --query dentist
+$NC calendar list                                     # default period
 $NC calendar list --on today
 $NC calendar list --from 2026-10-01 --to 2026-10-31 [--calendar Personal]
 $NC calendar get --uid <uid>
@@ -86,6 +87,17 @@ $NC calendar create --summary "Day off" --start 2026-12-24     # all-day
 $NC calendar edit --uid <uid> --start "2026-10-20 11:00" --end "2026-10-20 11:30"
 $NC calendar delete --uid <uid>
 ```
+
+`list` and `search` return `{"from", "to", "events"}` and always cover a limited
+period: by default **30 days ago until 90 days ahead**. Only `--from`: 90 days from
+there. Only `--to`: 120 days before it. Search ignores case, accents and word order.
+
+Not found? Do NOT conclude it doesn't exist. Search further, step by step, and stop
+as soon as you find it:
+- future ("next dentist appointment"): `--from +90 --to +365`, then `--from +365 --to +730`
+- past ("when was my last ..."): `--from -365 --to -30`, then `--from -730 --to -365`
+- unclear: future first, then past.
+Only then tell the user it wasn't found, and which period you searched.
 
 "Move my <event> <day>": `calendar search --query <word> --on <day>`. Exactly one
 hit: `calendar shift`. Several or none: show them and ask.

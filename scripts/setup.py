@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Nextcloud setup for Hermes Agent (rewrite/fork of adnw-vinc/hermes-nextcloud).
+Nextcloud setup for Hermes Agent.
 
   python3 setup.py                 interactive setup (app password is not echoed)
   python3 setup.py --check         test the saved credentials

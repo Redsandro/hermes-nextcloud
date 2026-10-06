@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Nextcloud API wrapper for Hermes Agent (rewrite/fork of adnw-vinc/hermes-nextcloud).
+Nextcloud API wrapper for Hermes Agent.
 
 Unified access to Nextcloud via WebDAV (files), the Notes API, CalDAV (events,
 tasks) and CardDAV (contacts). Standard library only, no curl.
@@ -424,7 +424,7 @@ def resolve_relative(value, tzname):
     word = parts[0].lower()
     if word in RELATIVE_DAYS:
         days = RELATIVE_DAYS[word]
-    elif re.fullmatch(r"[+-]\d{1,3}d?", word):
+    elif re.fullmatch(r"[+-]\d{1,4}d?", word):
         days = int(word.rstrip("d"))
     else:
         return v
@@ -1065,30 +1065,68 @@ def item_delete(c, comp, uid, calendar=None):
 
 # -- events -------------------------------------------------------------------
 
-def events_list(c, calendar=None, cal_from=None, cal_to=None, on=None):
+DEFAULT_PAST_DAYS = 30
+DEFAULT_FUTURE_DAYS = 90
+
+
+def _date_of(value, tzname):
+    v = resolve_relative(value, tzname)
+    m = re.match(r"(\d{4})-?(\d{2})-?(\d{2})", v)
+    if not m:
+        raise NCError(f"Cannot parse date {value!r}")
+    return datetime(int(m.group(1)), int(m.group(2)), int(m.group(3))).date()
+
+
+def _resolve_range(c, cal_from, cal_to, on):
+    """Always a bounded period, so recurring events can be expanded.
+    Default: 30 days ago .. 90 days ahead. Only --from: 90 days from there.
+    Only --to: 120 days before it."""
     if on:
-        cal_from = cal_to = on
-    start = range_bound(cal_from, c.tz) if cal_from else None
-    end = range_bound(cal_to, c.tz, end=True) if cal_to else None
-    return items_list(c, "VEVENT", calendar, start, end)
+        return on, on
+    if not cal_from and not cal_to:
+        return f"-{DEFAULT_PAST_DAYS}", f"+{DEFAULT_FUTURE_DAYS}"
+    if not cal_to:
+        return cal_from, (_date_of(cal_from, c.tz) + timedelta(days=DEFAULT_FUTURE_DAYS)).isoformat()
+    if not cal_from:
+        return (_date_of(cal_to, c.tz) - timedelta(days=DEFAULT_PAST_DAYS + DEFAULT_FUTURE_DAYS)).isoformat(), cal_to
+    return cal_from, cal_to
+
+
+def _events_in_range(c, calendar, cal_from, cal_to, on):
+    f, t = _resolve_range(c, cal_from, cal_to, on)
+    start, end = range_bound(f, c.tz), range_bound(t, c.tz, end=True)
+    if end <= start:
+        raise NCError("--to must not be before --from")
+    period = {"from": _date_of(f, c.tz).isoformat(), "to": _date_of(t, c.tz).isoformat()}
+    return period, items_list(c, "VEVENT", calendar, start, end)
+
+
+def _period_result(period, events):
+    out = {"from": period["from"], "to": period["to"], "events": events}
+    if not events:
+        out["hint"] = ("Nothing in this period. Search further with --from/--to "
+                       "(e.g. the next months, or the past year).")
+    return out
+
+
+def events_list(c, calendar=None, cal_from=None, cal_to=None, on=None):
+    period, events = _events_in_range(c, calendar, cal_from, cal_to, on)
+    return _period_result(period, events)
 
 
 def events_search(c, query, calendar=None, cal_from=None, cal_to=None, on=None):
     """Find events whose title, location or description contains the query.
-    Default range: today until 90 days from now. Recurring events are returned
-    per occurrence when the server supports expansion."""
-    if not on and not cal_from:
-        cal_from = "today"
-    if not on and not cal_to:
-        cal_to = "+90"
-    q = query.lower().strip()
+    Same default period as 'calendar list' (30 days ago .. 90 days ahead).
+    Recurring events are returned per occurrence."""
+    period, events = _events_in_range(c, calendar, cal_from, cal_to, on)
+    q = _norm(query.strip())
     out = []
-    for ev in events_list(c, calendar, cal_from, cal_to, on):
-        hay = " ".join(ev.get(k, "") for k in ("summary", "location", "description")).lower()
-        if not q or q in hay:
+    for ev in events:
+        hay = _norm(" ".join(ev.get(k, "") for k in ("summary", "location", "description")))
+        if not q or all(w in hay for w in q.split()):
             ev.pop("description", None)  # keep output small; use 'calendar get' for details
             out.append(ev)
-    return out
+    return _period_result(period, out)
 
 
 def events_get(c, uid, calendar=None):

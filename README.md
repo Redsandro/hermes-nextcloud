@@ -43,9 +43,11 @@ Python standard library only: no pip packages, no curl.
 
 ## Installation
 
+Make sure the _target_ directory is `nextcloud`:
+
 ```bash
 cd ~/.hermes/skills/productivity
-git clone https://github.com/adnw-vinc/hermes-nextcloud.git nextcloud
+git clone https://github.com/Redsandro/hermes-nextcloud.git nextcloud
 ```
 
 ## Setup
@@ -87,7 +89,9 @@ NC="python3 ~/.hermes/skills/productivity/nextcloud/scripts/nextcloud_api.py"
 $NC check
 ```
 
-Dates: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, or relative: `today`, `tomorrow`, `+3` (days), also with a time (`tomorrow 14:00`). Dutch words (`vandaag`, `morgen`, `overmorgen`) work too.
+Dates: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, or relative: `today`, `tomorrow`, `+90` / `-365` (days), also with a time (`tomorrow 14:00`). Dutch words (`vandaag`, `morgen`, `overmorgen`) work too.
+
+`calendar list` and `calendar search` always cover a limited period, by default 30 days back to 90 days ahead, and return `{"from", "to", "events"}`.
 
 Every command prints one JSON object, `{"status": "success", "data": ...}` or `{"status": "error", "message": ...}`, and exits with code 1 on error.
 
@@ -123,7 +127,8 @@ $NC notes delete --id 941
 $NC calendars list --type events
 $NC calendar list --from 2026-07-01 --to 2026-07-31 [--calendar Work]
 $NC calendar list --on today
-$NC calendar search --query standup --on tomorrow     # default: today .. +90 days
+$NC calendar search --query standup --on tomorrow
+$NC calendar search --query dentist --from +90 --to +365
 $NC calendar shift --uid <uid> --days 1               # keeps duration; --hours/--minutes too
 $NC calendar create --summary "Team standup" --start "2026-07-01 09:00" --end "2026-07-01 09:30"
 $NC calendar create --summary "Holiday" --start 2026-08-03          # all-day
