@@ -16,171 +16,137 @@ Connect your self-hosted Nextcloud instance to Hermes Agent. Manage files, notes
 
 hermes-nextcloud is a skill for Hermes Agent that wraps the Nextcloud WebDAV, Notes API, CalDAV, and CardDAV protocols into a command-line interface. If you run Nextcloud on your own VPS or home server, you can read and write your data without opening a browser.
 
-The skill communicates over HTTPS only. No desktop client or third-party sync service is required.
+Python standard library only: no pip packages, no curl.
 
 ## Features
 
-**Files:** Upload, download, list, delete, and move files through Nextcloud WebDAV.
+**Files:** List, search, read, upload, append, download, move, and delete files via WebDAV. Writes can be made conditional on the file's etag.
 
-**Notes:** Create, list, edit, and delete notes using the Nextcloud Notes API (requires the Notes app on your Nextcloud instance).
+**Notes:** List, find, read, create, edit, append to, and delete notes via the Nextcloud Notes API (requires the Notes app).
 
-**Calendar:** List calendars, create and edit events via CalDAV. Times are handled in your configured timezone.
+**Calendar:** List calendars and events, create, edit, and delete events via CalDAV. Times are read in your configured timezone.
 
-**Tasks:** Manage Nextcloud Tasks calendar items (tasks stored in a Tasks calendar).
+**Tasks:** List (optionally only open), create, edit, complete, reopen, and delete tasks.
 
-**Contacts:** Browse and search your address books, view contact cards, export as vCard.
+**Contacts:** List, search, view, create, edit, delete, and export contacts via CardDAV.
 
-**Setup:** Guided setup walks you through configuring your URL, username, and app password. Nothing is stored in plain text.
+**Safe edits:** Editing an event, task, or contact changes only the fields you pass. Everything else (recurrence, alarms, subtasks, addresses, photos) is kept, and the item is written back to its own URL with an etag check, so concurrent changes are never silently overwritten.
+
+**Setup:** Guided setup validates your URL, login, and app password and stores them in a private file.
 
 ## Requirements
 
 - A running Nextcloud instance (any recent version)
-- An **App Password** created in Nextcloud Settings → Security → App passwords
-- Python 3.8 or newer
+- An **App Password** (Settings → Security → Devices & sessions)
+- Python 3.8 or newer (3.9+ recommended for timezone support)
 - Hermes Agent
 
 ## Installation
-
-If Hermes Agent is running on the same machine where this repo is cloned:
 
 ```bash
 cd ~/.hermes/skills/productivity
 git clone https://github.com/adnw-vinc/hermes-nextcloud.git nextcloud
 ```
 
-Alternatively, copy the `nextcloud/` directory into your skills folder manually.
-
 ## Setup
-
-Run the guided setup:
 
 ```bash
 python3 ~/.hermes/skills/productivity/nextcloud/scripts/setup.py
 ```
 
-The script will ask for:
-1. Your Nextcloud URL (e.g. `https://nc.example.com`)
-2. Your Nextcloud username
-3. An App Password (not your login password)
+The script asks for your Nextcloud URL, login name, app password (input hidden), and timezone. It verifies the login, looks up your Nextcloud user id (which can differ from the login name, e.g. when logging in with an e-mail address), and saves everything to `~/.hermes/nextcloud.env` with mode 600.
 
-It validates the credentials and saves them to `~/.hermes/nextcloud.env`.
+```bash
+setup.py --check                                    # test saved credentials
+setup.py --url URL --user NAME --token-stdin < pw   # non-interactive
+```
 
 ### Manual configuration
 
+Environment variables override the env file.
+
 ```bash
 export NEXTCLOUD_URL="https://your-nextcloud.example.com"
-export NEXTCLOUD_USER="your_username"
+export NEXTCLOUD_USER="your_login"
 export NEXTCLOUD_TOKEN="your_app_password"
-export NEXTCLOUD_TIMEZONE="Europe/Prague"   # optional, defaults to UTC
+export NEXTCLOUD_TIMEZONE="Europe/Amsterdam"   # optional, default UTC
+export NEXTCLOUD_USER_ID="your_user_id"        # optional, only if it differs from the login
 ```
 
 ### Creating an App Password
 
 1. Log in to your Nextcloud instance
-2. Go to **Settings → Security → App passwords**
-3. Click **Add new app password**
-4. Give it a name (e.g. `hermes-agent`) and click **Create**
-5. Copy the password. It is shown only once.
+2. Go to **Settings → Security → Devices & sessions**
+3. Enter a name (e.g. `hermes-agent`) and click **Create new app password**
+4. Copy the password. It is shown only once.
 
 ## Usage
 
-All commands are called through the Python script:
-
 ```bash
 NC="python3 ~/.hermes/skills/productivity/nextcloud/scripts/nextcloud_api.py"
+$NC check
 ```
+
+Every command prints one JSON object, `{"status": "success", "data": ...}` or `{"status": "error", "message": ...}`, and exits with code 1 on error.
 
 ### Files
 
 ```bash
-# List files in a directory
 $NC files list --path /Documents
-
-# Upload a file
-$NC files upload --local ./report.pdf --remote /Documents/report.pdf
-
-# Download a file
+$NC files search --query budget
+$NC files get --path /Notes/todo.md                      # content + etag
+$NC files append --path /Notes/todo.md --text "- [ ] milk"
+$NC files upload --path /Notes/todo.md --content - --if-match '<etag>' < todo.md
+$NC files upload --remote /Documents/report.pdf --local ./report.pdf
 $NC files download --remote /Documents/report.pdf --local ./report.pdf
-
-# Delete a file
+$NC files move --src /a.txt --dst /b.txt
 $NC files delete --path /Documents/old.txt
 ```
 
 ### Notes (requires Nextcloud Notes app)
 
 ```bash
-# List all notes
-$NC notes list
-
-# Create a note
+$NC notes list                      # without content
+$NC notes find --query meeting
+$NC notes get --id 941              # content + etag
 $NC notes create --title "Meeting notes" --content "Discussed the Q3 roadmap."
-
-# Edit a note
-$NC notes edit --id 941 --title "Updated title" --content "New content here."
-
-# Delete a note
+$NC notes append --id 941 --text "Follow up next week."
+$NC notes edit --id 941 --content - --etag <etag> < note.md
 $NC notes delete --id 941
 ```
 
 ### Calendar
 
 ```bash
-# List calendars
-$NC calendar list
-
-# List events in a calendar
-$NC calendar list --calendar "Personal"
-
-# Create an event
-$NC calendar create \
-    --summary "Team standup" \
-    --start "2026-07-01T09:00:00Z" \
-    --end "2026-07-01T09:30:00Z" \
-    --calendar "Work"
-
-# Edit an event
-$NC calendar edit --uid <event-uid> --summary "New title"
-
-# Delete an event
-$NC calendar delete --uid <event-uid>
+$NC calendars list --type events
+$NC calendar list --from 2026-07-01 --to 2026-07-31 [--calendar Work]
+$NC calendar create --summary "Team standup" --start "2026-07-01 09:00" --end "2026-07-01 09:30"
+$NC calendar create --summary "Holiday" --start 2026-08-03          # all-day
+$NC calendar edit --uid <uid> --summary "New title"
+$NC calendar delete --uid <uid>
 ```
 
 ### Tasks
 
 ```bash
-# List all tasks
-$NC tasks list
-
-# Create a task
-$NC tasks create --summary "Review pull request" --due "2026-07-05"
-
-# Complete a task
-$NC tasks complete --uid <task-uid>
-
-# Edit a task
-$NC tasks edit --uid <task-uid> --summary "Updated summary"
+$NC tasks list --open
+$NC tasks create --title "Review pull request" --due 2026-07-05 [--priority 1]
+$NC tasks edit --uid <uid> --title "Updated title"
+$NC tasks complete --uid <uid>
+$NC tasks reopen --uid <uid>
+$NC tasks delete --uid <uid>
 ```
 
 ### Contacts
 
 ```bash
-# List address books
-$NC contacts list
-
-# List contacts in an address book
-$NC contacts list --addressbook "Personal"
-
-# Get a contact by UID
-$NC contacts get --uid <contact-uid>
-
-# Export a contact as vCard
-$NC contacts export --uid <contact-uid> --local ./contact.vcf
-```
-
-### Verify the setup
-
-```bash
-$NC check
+$NC addressbooks list
+$NC contacts list [--addressbook Contacts]
+$NC contacts search --query jansen
+$NC contacts get --uid <uid>
+$NC contacts create --name "Jan Jansen" --email jan@example.com --phone "+31 6 12345678"
+$NC contacts edit --uid <uid> --email new@example.com   # replaces all e-mail addresses
+$NC contacts export --uid <uid> --local ./contact.vcf
 ```
 
 ## Project structure
@@ -189,37 +155,24 @@ $NC check
 hermes-nextcloud/
 ├── README.md
 ├── LICENSE
-├── SKILL.md                          # Skill manifest and documentation
+├── SKILL.md                  # Skill manifest and agent instructions
 └── scripts/
-    ├── nextcloud_api.py              # Main CLI — all commands
-    ├── setup.py                      # Guided credential setup
-    └── requirements.txt              # Python dependencies (python-caldav)
+    ├── nextcloud_api.py      # Main CLI, all commands
+    ├── setup.py              # Guided credential setup
+    └── requirements.txt      # Empty: standard library only
 ```
-
-The `SKILL.md` file is the skill manifest. Hermes Agent loads it automatically when the skill is installed.
 
 ## Security
 
-Credentials are stored in `~/.hermes/nextcloud.env` with restricted file permissions (mode 0600). This file is never committed to git or shared anywhere.
-
-The script only accepts an **App Password**, not your main Nextcloud password. App passwords can be revoked individually from Nextcloud Settings without affecting your main login.
+- Credentials are stored in `~/.hermes/nextcloud.env`, created with mode 600. Use an **App Password**, never your login password; it can be revoked on its own.
+- The password is never passed on a command line (no curl), never printed, and never sent over plain `http://` (unless you set `NEXTCLOUD_ALLOW_HTTP=1`). Redirects are not followed.
+- Every HTTP status is checked: a failed request is reported as an error, never as success.
+- SKILL.md instructs the agent to treat content from Nextcloud as data, not as instructions.
 
 ## Contributing
 
-Contributions are welcome. If you find a bug or want a new feature, open an issue or a pull request.
-
-1. Fork the repository
-2. Create a branch (`git checkout -b fix/something`)
-3. Make your changes
-4. Run a functional test against your own Nextcloud instance
-5. Open a pull request
+This fork is tailored for personal use. It's best to contribute upstream.
 
 ## License
 
 MIT License. See [LICENSE](LICENSE) for the full text.
-
----
-
-## Sponsored by
-
-This project is proudly sponsored by [Adventure Does Not Wait](https://adventuredoesnotwait.com) - Sustainable outdoor apparel & accessories for adventure seekers. Organic cotton clothing designed for those who embrace exploration and protect our planet. Real photos no AI Slop! Don't wait for the perfect moment -- start your adventure today!

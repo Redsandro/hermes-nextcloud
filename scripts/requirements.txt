@@ -1,1 +1,1 @@
-caldav>=3.2.0
+# Geen externe afhankelijkheden; alleen de Python-standaardbibliotheek.
