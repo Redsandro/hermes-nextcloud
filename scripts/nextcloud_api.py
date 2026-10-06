@@ -25,6 +25,7 @@ import os
 import re
 import socket
 import sys
+import unicodedata
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -403,6 +404,34 @@ def _zone(tzname):
         raise NCError(f"Unknown timezone {tzname!r} (set NEXTCLOUD_TIMEZONE, e.g. Europe/Amsterdam)")
 
 
+RELATIVE_DAYS = {
+    "today": 0, "vandaag": 0, "tomorrow": 1, "morgen": 1, "overmorgen": 2,
+    "yesterday": -1, "gisteren": -1, "eergisteren": -2,
+}
+
+
+def local_today(tzname):
+    zone = _zone(tzname) or timezone.utc
+    return datetime.now(zone).date()
+
+
+def resolve_relative(value, tzname):
+    """'morgen', 'today 14:00', '+3' (days) -> 'YYYY-MM-DD[ HH:MM]' in the user's timezone."""
+    v = value.strip()
+    parts = v.split(None, 1)
+    if not parts:
+        return v
+    word = parts[0].lower()
+    if word in RELATIVE_DAYS:
+        days = RELATIVE_DAYS[word]
+    elif re.fullmatch(r"[+-]\d{1,3}d?", word):
+        days = int(word.rstrip("d"))
+    else:
+        return v
+    d = local_today(tzname) + timedelta(days=days)
+    return d.isoformat() + (" " + parts[1] if len(parts) > 1 else "")
+
+
 def parse_user_dt(value, tzname):
     """User input -> (params, ical_value, is_date).
 
@@ -410,7 +439,7 @@ def parse_user_dt(value, tzname):
     configured timezone and written as UTC ('...Z'), which every client and
     server accepts without needing a VTIMEZONE block.
     """
-    v = value.strip()
+    v = resolve_relative(value, tzname)
     if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
         return ";VALUE=DATE", v.replace("-", ""), True
     if re.fullmatch(r"\d{8}", v):
@@ -472,6 +501,17 @@ def display_dt(params, value, tzname):
         return dt.strftime("%Y-%m-%dT%H:%M:%S%z")
     except (ValueError, NCError):
         return value
+
+
+def _display_to_utc(v, tzname):
+    """Inverse of display_dt (for local range filtering). None if unparseable."""
+    try:
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            zone = _zone(tzname) or timezone.utc
+            return datetime.strptime(v, "%Y-%m-%d").replace(tzinfo=zone).astimezone(timezone.utc)
+        return datetime.strptime(v, "%Y-%m-%dT%H:%M:%S%z").astimezone(timezone.utc)
+    except (ValueError, NCError):
+        return None
 
 
 def now_utc():
@@ -751,8 +791,12 @@ def pick_calendar(c, comp, name=None, preferred=()):
     return cals[0]
 
 
-def _cal_query(c, cal_href, comp, start=None, end=None, uid=None):
-    """-> list of (href, etag, ics). REPORT calendar-query with a GET fallback."""
+def _cal_query(c, cal_href, comp, start=None, end=None, uid=None, expand=False):
+    """-> list of (href, etag, ics). REPORT calendar-query with a GET fallback.
+
+    expand=True (needs start and end) asks the server to return recurring
+    events as separate occurrences in that range, each with a RECURRENCE-ID.
+    """
     tr = f'<c:time-range start="{start}" end="{end}"/>' if (start or end) else ""
     if tr and not start:
         tr = f'<c:time-range end="{end}"/>'
@@ -760,9 +804,11 @@ def _cal_query(c, cal_href, comp, start=None, end=None, uid=None):
         tr = f'<c:time-range start="{start}"/>'
     uf = (f'<c:prop-filter name="UID"><c:text-match collation="i;octet">{xml_escape(uid)}</c:text-match>'
           f'</c:prop-filter>') if uid else ""
+    cdata = (f'<c:calendar-data><c:expand start="{start}" end="{end}"/></c:calendar-data>'
+             if (expand and start and end) else "<c:calendar-data/>")
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <c:calendar-query xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav">
-  <d:prop><d:getetag/><c:calendar-data/></d:prop>
+  <d:prop><d:getetag/>{cdata}</d:prop>
   <c:filter><c:comp-filter name="VCALENDAR"><c:comp-filter name="{comp}">{tr}{uf}</c:comp-filter></c:comp-filter></c:filter>
 </c:calendar-query>"""
     try:
@@ -796,6 +842,20 @@ def _cal_item(c, href, etag, ics, comp, cal):
     block = master_block(lines, comp)
     if block is None:
         return None
+    return _item_from_block(c, lines, block, comp, cal, href, etag)
+
+
+def _cal_items(c, href, etag, ics, comp, cal, expanded):
+    """All items in one calendar object. With server-side expansion every
+    occurrence of a recurring event is its own block; otherwise only the master."""
+    lines = unfold(ics)
+    if not expanded:
+        it = _cal_item(c, href, etag, ics, comp, cal)
+        return [it] if it else []
+    return [_item_from_block(c, lines, b, comp, cal, href, etag) for b in find_blocks(lines, comp)]
+
+
+def _item_from_block(c, lines, block, comp, cal, href, etag):
     p = props_dict(lines, block)
 
     def first(name, unescape=True):
@@ -811,8 +871,13 @@ def _cal_item(c, href, etag, ics, comp, cal):
     item = {"uid": first("UID", False), "summary": first("SUMMARY")}
     if comp == "VEVENT":
         item.update({"start": dt("DTSTART"), "end": dt("DTEND"), "location": first("LOCATION")})
-        if "RRULE" in p:
-            item["recurring"] = first("RRULE", False)
+        if "RECURRENCE-ID" in p:
+            # One occurrence of a recurring series (from server-side expansion)
+            item["occurrence_of_series"] = True
+            item["recurrence_id"] = p["RECURRENCE-ID"][0][1]
+        elif "RRULE" in p or "RDATE" in p:
+            item["recurring"] = first("RRULE", False) or "RDATE"
+            item["note"] = "start/end are those of the FIRST event of the series"
     else:
         item.update({"due": dt("DUE"), "status": first("STATUS", False) or "NEEDS-ACTION"})
         if "COMPLETED" in p:
@@ -833,12 +898,25 @@ def _cal_item(c, href, etag, ics, comp, cal):
 
 def items_list(c, comp, calendar=None, start=None, end=None):
     cals = [pick_calendar(c, comp, calendar)] if calendar else calendars_list(c, comp)
+    expand = comp == "VEVENT" and bool(start and end)
     out = []
     for cal in cals:
-        for href, etag, ics in _cal_query(c, cal["href"], comp, start, end):
-            it = _cal_item(c, href, etag, ics, comp, cal)
-            if it:
-                out.append(it)
+        for href, etag, ics in _cal_query(c, cal["href"], comp, start, end, expand=expand):
+            out.extend(it for it in _cal_items(c, href, etag, ics, comp, cal, expand) if it)
+    if comp == "VEVENT" and (start or end):
+        # Also filter locally: the PROPFIND fallback (and some servers) do not filter.
+        lo = datetime.strptime(start, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc) if start else None
+        hi = datetime.strptime(end, "%Y%m%dT%H%M%SZ").replace(tzinfo=timezone.utc) if end else None
+        kept = []
+        for it in out:
+            if it.get("recurring"):  # unexpanded series: cannot judge locally, keep it
+                kept.append(it)
+                continue
+            s_ = _display_to_utc(it.get("start", ""), c.tz)
+            e_ = _display_to_utc(it.get("end", ""), c.tz) or s_
+            if s_ is None or ((hi is None or s_ < hi) and (lo is None or e_ > lo)):
+                kept.append(it)
+        out = kept
     key = "start" if comp == "VEVENT" else "due"
     out.sort(key=lambda x: (x.get(key) or "9999", x.get("summary", "").lower()))
     return out
@@ -925,8 +1003,8 @@ def tasks_create(c, title, calendar=None, due=None, priority=None, description=N
     return {"uid": uid, "summary": title, "calendar": cal["name"], "href": href, "etag": etag, "created": True}
 
 
-def _edit_item(c, comp, uid, calendar, etag, remove, add):
-    cal, href, cur_etag, ics = find_item(c, comp, uid, calendar)
+def _edit_item(c, comp, uid, calendar, etag, remove, add, found=None):
+    cal, href, cur_etag, ics = found or find_item(c, comp, uid, calendar)
     remove = set(remove) | {"DTSTAMP", "LAST-MODIFIED"}
     add = list(add) + [f"DTSTAMP:{now_utc()}", f"LAST-MODIFIED:{now_utc()}"]
     if comp == "VEVENT":
@@ -987,10 +1065,96 @@ def item_delete(c, comp, uid, calendar=None):
 
 # -- events -------------------------------------------------------------------
 
-def events_list(c, calendar=None, cal_from=None, cal_to=None):
+def events_list(c, calendar=None, cal_from=None, cal_to=None, on=None):
+    if on:
+        cal_from = cal_to = on
     start = range_bound(cal_from, c.tz) if cal_from else None
     end = range_bound(cal_to, c.tz, end=True) if cal_to else None
     return items_list(c, "VEVENT", calendar, start, end)
+
+
+def events_search(c, query, calendar=None, cal_from=None, cal_to=None, on=None):
+    """Find events whose title, location or description contains the query.
+    Default range: today until 90 days from now. Recurring events are returned
+    per occurrence when the server supports expansion."""
+    if not on and not cal_from:
+        cal_from = "today"
+    if not on and not cal_to:
+        cal_to = "+90"
+    q = query.lower().strip()
+    out = []
+    for ev in events_list(c, calendar, cal_from, cal_to, on):
+        hay = " ".join(ev.get(k, "") for k in ("summary", "location", "description")).lower()
+        if not q or q in hay:
+            ev.pop("description", None)  # keep output small; use 'calendar get' for details
+            out.append(ev)
+    return out
+
+
+def events_get(c, uid, calendar=None):
+    cal, href, etag, ics = find_item(c, "VEVENT", uid, calendar)
+    return _cal_item(c, href, etag, ics, "VEVENT", cal)
+
+
+def _is_recurring(lines, block):
+    p = props_dict(lines, block)
+    return any(k in p for k in ("RRULE", "RDATE"))
+
+
+def _shift_value(params, value, delta):
+    """Shift one iCal date/date-time value, keeping its form (date, UTC, TZID, floating)."""
+    if "VALUE=DATE" in params.upper() and "DATE-TIME" not in params.upper() or re.fullmatch(r"\d{8}", value):
+        if delta.seconds or delta.microseconds:
+            raise NCError("This is an all-day event: shift it by whole days only")
+        return (datetime.strptime(value, "%Y%m%d") + delta).strftime("%Y%m%d")
+    z = value.endswith("Z")
+    dt = datetime.strptime(value.rstrip("Z"), "%Y%m%dT%H%M%S") + delta
+    # For TZID / floating times this keeps the wall-clock time (correct across DST).
+    return dt.strftime("%Y%m%dT%H%M%S") + ("Z" if z else "")
+
+
+def events_shift(c, uid, days=0, hours=0, minutes=0, calendar=None, series=False, etag=None):
+    """Move an event by an offset, keeping its duration and timezone."""
+    delta = timedelta(days=days, hours=hours, minutes=minutes)
+    if not delta:
+        raise NCError("Give --days, --hours and/or --minutes (may be negative)")
+    found = find_item(c, "VEVENT", uid, calendar)
+    cal, href, cur_etag, ics = found
+    lines = unfold(ics)
+    block = master_block(lines, "VEVENT")
+    p = props_dict(lines, block)
+    recurring = _is_recurring(lines, block)
+    if recurring and not series:
+        raise NCError(
+            "This is a RECURRING event. Shifting it moves the WHOLE series. Ask the user: "
+            "move the whole series (repeat with --series), or only this one occurrence "
+            "(not supported by this tool: do that in the Nextcloud or phone calendar app).")
+    if recurring and len(find_blocks(lines, "VEVENT")) > 1:
+        raise NCError("This series has individually changed occurrences; shifting the whole series could "
+                      "break them. Do this in the Nextcloud or phone calendar app.")
+    if "DTSTART" not in p:
+        raise NCError("Event has no start time")
+    remove, add = {"DTSTART"}, []
+    sp, sv = p["DTSTART"][0]
+    add.append(f"DTSTART{sp}:{_shift_value(sp, sv, delta)}")
+    if "DTEND" in p:
+        ep, ev = p["DTEND"][0]
+        remove.add("DTEND")
+        add.append(f"DTEND{ep}:{_shift_value(ep, ev, delta)}")
+    if series:
+        for name in ("EXDATE", "RDATE"):
+            if name in p:
+                remove.add(name)
+                for xp, xv in p[name]:
+                    if "PERIOD" in xp.upper():
+                        raise NCError(f"{name} with periods is not supported; use the calendar app")
+                    add.append(f"{name}{xp}:" + ",".join(_shift_value(xp, v, delta) for v in xv.split(",")))
+    old_start = display_dt(sp, sv, c.tz)
+    item = _edit_item(c, "VEVENT", uid, calendar, etag, remove, add, found=found)
+    item["moved_from"] = old_start
+    if recurring:
+        item["whole_series_moved"] = True
+    return item
 
 
 def events_create(c, summary, start, end=None, calendar=None, location=None, description=None):
@@ -1023,7 +1187,7 @@ def events_create(c, summary, start, end=None, calendar=None, location=None, des
 
 
 def events_edit(c, uid, calendar=None, summary=None, start=None, end=None, location=None,
-                description=None, etag=None):
+                description=None, etag=None, series=False):
     remove, add = set(), []
     if summary is not None:
         remove.add("SUMMARY"); add.append(_text_prop("SUMMARY", summary))
@@ -1041,7 +1205,15 @@ def events_edit(c, uid, calendar=None, summary=None, start=None, end=None, locat
             add.append(_text_prop("DESCRIPTION", description))
     if not remove:
         raise NCError("Nothing to change")
-    return _edit_item(c, "VEVENT", uid, calendar, etag, remove, add)
+    found = find_item(c, "VEVENT", uid, calendar)
+    if (start is not None or end is not None) and not series:
+        lines = unfold(found[3])
+        if _is_recurring(lines, master_block(lines, "VEVENT")):
+            raise NCError(
+                "This is a RECURRING event: changing start/end changes the WHOLE series. Ask the user "
+                "first; if they want that, repeat with --series. A single occurrence cannot be moved "
+                "with this tool (use the calendar app).")
+    return _edit_item(c, "VEVENT", uid, calendar, etag, remove, add, found=found)
 
 
 # ---------------------------------------------------------------------------
@@ -1079,26 +1251,40 @@ def pick_addressbook(c, name=None):
     return books[0]
 
 
-def _card_query(c, ab_href, uid=None):
-    """-> list of (href, etag, vcf). REPORT addressbook-query with a GET fallback."""
+# Text fields fetched for list/search (no PHOTO/LOGO/SOUND/KEY: those can be megabytes).
+LIST_PROPS = ("VERSION", "UID", "FN", "N", "NICKNAME", "ORG", "TITLE", "ROLE", "CATEGORIES",
+              "EMAIL", "TEL", "URL", "NOTE", "ADR", "BDAY")
+
+
+def _card_query(c, ab_href, uid=None, props=None):
+    """-> list of (href, etag, vcf). REPORT addressbook-query with a GET fallback.
+
+    props: only ask the server for these vCard properties (read-only use!).
+    Items fetched with props must NEVER be written back; edits use full items.
+    """
     if uid:
         flt = (f'<card:prop-filter name="UID"><card:text-match collation="i;octet" match-type="equals">'
                f'{xml_escape(uid)}</card:text-match></card:prop-filter>')
     else:
         flt = '<card:prop-filter name="FN"/>'
+    if props:
+        adata = ("<card:address-data>" + "".join(f'<card:prop name="{x}"/>' for x in props)
+                 + "</card:address-data>")
+    else:
+        adata = "<card:address-data/>"
     body = f"""<?xml version="1.0" encoding="UTF-8"?>
 <card:addressbook-query xmlns:d="DAV:" xmlns:card="urn:ietf:params:xml:ns:carddav">
-  <d:prop><d:getetag/><card:address-data/></d:prop>
+  <d:prop><d:getetag/>{adata}</d:prop>
   <card:filter test="anyof">{flt}</card:filter>
 </card:addressbook-query>"""
     try:
         _, _, res = c.request("REPORT", ab_href, body,
                               {"Depth": "1", "Content-Type": "application/xml; charset=utf-8"}, ok=(207,))
         out = []
-        for href, props in parse_multistatus(res):
-            data = props.get(CARD + "address-data")
+        for href, prps in parse_multistatus(res):
+            data = prps.get(CARD + "address-data")
             if data is not None and data.text:
-                out.append((href, _ptext(props, D + "getetag"), data.text))
+                out.append((href, _ptext(prps, D + "getetag"), data.text))
         return out
     except NCError as e:
         if e.status not in (400, 403, 405, 415, 501):
@@ -1112,6 +1298,12 @@ def _card_query(c, ab_href, uid=None):
         _, h, data = c.request("GET", href, headers={"Accept": "text/vcard"}, ok=(200,))
         out.append((href, h.get("ETag", "") if h else "", data.decode("utf-8", "replace")))
     return out
+
+
+def _structured(value):
+    """'Acme;Sales;' (ORG/ADR/N) -> 'Acme, Sales'."""
+    parts = [ical_unescape(x).strip() for x in re.split(r"(?<!\\);", value)]
+    return ", ".join(x for x in parts if x)
 
 
 def _contact(href, etag, vcf, book):
@@ -1128,48 +1320,161 @@ def _contact(href, etag, vcf, book):
     def many(name):
         return [ical_unescape(v) for _, v in p.get(name, []) if v.strip()]
 
-    org = p.get("ORG")
-    org_s = ", ".join(x for x in (ical_unescape(s) for s in re.split(r"(?<!\\);", org[0][1])) if x) if org else ""
-    adrs = []
-    for _, v in p.get("ADR", []):
-        parts = [ical_unescape(s).strip() for s in re.split(r"(?<!\\);", v)]
-        s = ", ".join(x for x in parts if x)
-        if s:
-            adrs.append(s)
     c = {
-        "uid": first("UID"), "fullname": first("FN"), "emails": many("EMAIL"), "phones": many("TEL"),
-        "organization": org_s, "title": first("TITLE"), "birthday": first("BDAY"),
-        "addresses": adrs, "note": first("NOTE"),
+        "uid": first("UID"), "fullname": first("FN"), "nickname": first("NICKNAME"),
+        "organization": _structured(p["ORG"][0][1]) if p.get("ORG") else "",
+        "title": first("TITLE") or first("ROLE"),
+        "categories": first("CATEGORIES"),
+        "emails": many("EMAIL"), "phones": many("TEL"), "urls": many("URL"),
+        "addresses": [a for a in (_structured(v) for _, v in p.get("ADR", [])) if a],
+        "birthday": first("BDAY"), "note": first("NOTE"),
         "addressbook": book["name"], "href": href, "etag": etag,
     }
-    return {k: v for k, v in c.items() if v not in ("", [])}
+    c = {k: v for k, v in c.items() if v not in ("", [])}
+    c["_props"] = p  # internal, for searching; removed before output
+    return c
 
 
-def contacts_list(c, addressbook=None):
+def _public(ct):
+    return {k: v for k, v in ct.items() if not k.startswith("_")}
+
+
+def _all_contacts(c, addressbook=None):
     books = [pick_addressbook(c, addressbook)] if addressbook else addressbooks_list(c)
-    out = []
+    out, seen = [], set()
     for b in books:
-        for href, etag, vcf in _card_query(c, b["href"]):
+        for href, etag, vcf in _card_query(c, b["href"], props=LIST_PROPS):
             ct = _contact(href, etag, vcf, b)
-            if ct and ct.get("fullname"):
+            if not ct or not (ct.get("fullname") or ct.get("organization")):
+                continue
+            k = ct.get("uid") or ct["href"]
+            if k not in seen:
+                seen.add(k)
                 out.append(ct)
-    seen, uniq = set(), []
-    for ct in out:
-        k = ct.get("uid") or ct["href"]
-        if k not in seen:
-            seen.add(k)
-            uniq.append(ct)
-    uniq.sort(key=lambda x: x.get("fullname", "").lower())
-    return uniq
+    out.sort(key=lambda x: _norm(x.get("fullname") or x.get("organization", "")))
+    return out
 
 
-def contacts_search(c, query):
-    q = query.lower()
-    qd = re.sub(r"\D", "", q)
-    return [ct for ct in contacts_list(c)
-            if q in ct.get("fullname", "").lower() or q in ct.get("organization", "").lower()
-            or any(q in e.lower() for e in ct.get("emails", []))
-            or (len(qd) >= 3 and any(qd in re.sub(r"\D", "", p) for p in ct.get("phones", [])))]
+COMPACT_FIELDS = ("uid", "fullname", "nickname", "organization", "title", "categories")
+
+
+def contacts_list(c, addressbook=None, compact=False):
+    """compact=True: only name/organization/title/categories, small enough for
+    the agent to read through a whole address book itself."""
+    out = []
+    for ct in _all_contacts(c, addressbook):
+        ct = _public(ct)
+        if compact:
+            ct = {k: ct[k] for k in COMPACT_FIELDS if k in ct}
+        out.append(ct)
+    return out
+
+
+# -- search -------------------------------------------------------------------
+
+def _norm(s):
+    """Case- and accent-insensitive form: 'José Zoë' -> 'jose zoe'."""
+    s = unicodedata.normalize("NFKD", s or "")
+    return "".join(ch for ch in s if not unicodedata.combining(ch)).casefold()
+
+
+def _digits(s):
+    return re.sub(r"\D", "", s or "")
+
+
+# field label -> (vCard properties, weight). Higher weight ranks higher.
+SEARCH_FIELDS = (
+    ("name", ("FN", "N", "NICKNAME"), 3),
+    ("organization", ("ORG",), 2),
+    ("title", ("TITLE", "ROLE"), 2),
+    ("categories", ("CATEGORIES",), 2),
+    ("email", ("EMAIL",), 1),
+    ("url", ("URL",), 1),
+    ("note", ("NOTE",), 1),
+    ("address", ("ADR",), 1),
+)
+
+
+def _word_score(word, text):
+    """3 = whole word, 2 = start of a word (also inside URLs/e-mails), 1 = anywhere, 0 = no."""
+    if word not in text:
+        return 0
+    tokens = [t for t in re.split(r"[^\w]+", text) if t]
+    if word in tokens:
+        return 3
+    if any(t.startswith(word) for t in tokens):
+        return 2
+    return 1
+
+
+def _phone_match(qd, phones):
+    for ph in phones:
+        pd = _digits(ph)
+        if qd in pd:
+            return True
+        # +31 6 1234 5678 vs 06-12345678: compare the last 9 digits
+        if len(qd) >= 9 and len(pd) >= 9 and pd[-9:] == qd[-9:]:
+            return True
+    return False
+
+
+def _match(ct, words):
+    """All words must match somewhere. -> (score, matched field labels) or None."""
+    p = ct["_props"]
+    texts = {}
+    for label, names, weight in SEARCH_FIELDS:
+        vals = [_structured(v) if n in ("N", "ORG", "ADR") else ical_unescape(v)
+                for n in names for _, v in p.get(n, [])]
+        texts[label] = (_norm(" | ".join(vals)), weight)
+    total, where = 0, []
+    for w in words:
+        best, best_label = 0, None
+        for label, (text, weight) in texts.items():
+            sc = _word_score(w, text) * weight
+            if sc > best:
+                best, best_label = sc, label
+        if not best and re.fullmatch(r"\d{3,}", w) and _phone_match(w, ct.get("phones", [])):
+            best, best_label = 3, "phone"
+        if not best:
+            return None
+        total += best
+        if best_label not in where:
+            where.append(best_label)
+    return total, where
+
+
+def contacts_search(c, query, addressbook=None, limit=20):
+    """Search all text fields. 'henk knol' = both words must match (anywhere);
+    'dokter, huisarts, arts' = any of the alternatives. Best matches first,
+    with 'matched_in' telling in which fields the hit was."""
+    if re.fullmatch(r"[\d\s+\-().]+", query.strip()):
+        alternatives = [query.strip()]  # a phone number: commas/spaces are not separators
+    else:
+        alternatives = [a.strip() for a in query.split(",") if a.strip()]
+    if not alternatives:
+        raise NCError("Empty query")
+    alt_words = []
+    for a in alternatives:
+        if re.fullmatch(r"[\d\s+\-().]+", a):
+            alt_words.append([_digits(a)])
+        else:
+            alt_words.append([w for w in re.split(r"\s+", _norm(a)) if w])
+    hits = []
+    for ct in _all_contacts(c, addressbook):
+        best = None
+        for words in alt_words:
+            m = _match(ct, words)
+            if m and (best is None or m[0] > best[0]):
+                best = m
+        if best:
+            out = _public(ct)
+            out["matched_in"] = best[1]
+            hits.append((best[0], out))
+    hits.sort(key=lambda h: (-h[0], _norm(h[1].get("fullname", ""))))
+    result = [h[1] for h in hits[:limit]]
+    if len(hits) > limit:
+        result.append({"more": len(hits) - limit, "hint": "Refine the query or raise --limit"})
+    return result
 
 
 def find_contact(c, uid, addressbook=None):
@@ -1185,7 +1490,7 @@ def find_contact(c, uid, addressbook=None):
 
 def contacts_get(c, uid, addressbook=None, raw=False):
     b, href, etag, vcf = find_contact(c, uid, addressbook)
-    ct = _contact(href, etag, vcf, b)
+    ct = _public(_contact(href, etag, vcf, b))
     if raw:
         ct["vcard"] = vcf
     return ct
@@ -1254,7 +1559,7 @@ def contacts_edit(c, uid, addressbook=None, name=None, email=None, phone=None, o
     new_vcf = modify_component(vcf, "VCARD", remove, add)
     _, h, _ = c.request("PUT", href, new_vcf, {"Content-Type": "text/vcard; charset=utf-8",
                                                "If-Match": etag or cur_etag}, ok=(200, 201, 204))
-    ct = _contact(href, h.get("ETag", "") if h else "", new_vcf, b)
+    ct = _public(_contact(href, h.get("ETag", "") if h else "", new_vcf, b))
     ct["updated"] = True
     return ct
 
@@ -1357,17 +1662,33 @@ def build_parser():
     e = sub.add_parser("calendar", help="Events (CalDAV VEVENT)").add_subparsers(dest="sub")
     x = e.add_parser("list"); x.add_argument("--calendar")
     x.add_argument("--from", dest="cal_from"); x.add_argument("--to", dest="cal_to")
+    x.add_argument("--on", help="One day, e.g. 2026-10-07, 'morgen', 'today', '+2'")
+    x = e.add_parser("search", help="Find events by title/location/description")
+    x.add_argument("--query", default="", help="Text to look for ('' = everything in range)")
+    x.add_argument("--calendar"); x.add_argument("--on")
+    x.add_argument("--from", dest="cal_from"); x.add_argument("--to", dest="cal_to")
+    x = e.add_parser("get"); x.add_argument("--uid", required=True); x.add_argument("--calendar")
+    x = e.add_parser("shift", help="Move an event by an offset, keeping its duration")
+    x.add_argument("--uid", required=True); x.add_argument("--calendar")
+    x.add_argument("--days", type=int, default=0); x.add_argument("--hours", type=int, default=0)
+    x.add_argument("--minutes", type=int, default=0)
+    x.add_argument("--series", action="store_true", help="Required to move a recurring series")
+    x.add_argument("--etag")
     x = e.add_parser("create"); x.add_argument("--summary", required=True); x.add_argument("--start", required=True)
     x.add_argument("--end"); x.add_argument("--calendar"); x.add_argument("--location"); x.add_argument("--description")
     x = e.add_parser("edit"); x.add_argument("--uid", required=True); x.add_argument("--calendar")
     x.add_argument("--summary"); x.add_argument("--start"); x.add_argument("--end")
     x.add_argument("--location"); x.add_argument("--description"); x.add_argument("--etag")
+    x.add_argument("--series", action="store_true", help="Required to change start/end of a recurring series")
     x = e.add_parser("delete"); x.add_argument("--uid", required=True); x.add_argument("--calendar")
 
     # contacts
     ct = sub.add_parser("contacts", help="Contacts (CardDAV)").add_subparsers(dest="sub")
     x = ct.add_parser("list"); x.add_argument("--addressbook")
-    x = ct.add_parser("search"); x.add_argument("--query", required=True)
+    x.add_argument("--compact", action="store_true", help="Only name/organization/title/categories")
+    x = ct.add_parser("search", help="Search all fields; 'a b' = both words, 'a, b' = either")
+    x.add_argument("--query", required=True); x.add_argument("--addressbook")
+    x.add_argument("--limit", type=int, default=20)
     x = ct.add_parser("get"); x.add_argument("--uid", required=True); x.add_argument("--addressbook")
     x.add_argument("--raw", action="store_true", help="Include the full vCard")
     x = ct.add_parser("create"); x.add_argument("--name", required=True); x.add_argument("--addressbook")
@@ -1430,15 +1751,20 @@ def dispatch(c, a):
         if s == "reopen": return tasks_reopen(c, a.uid, a.calendar)
         if s == "delete": return item_delete(c, "VTODO", a.uid, a.calendar)
     if cmd == "calendar":
-        if s == "list": return events_list(c, a.calendar, a.cal_from, a.cal_to)
+        if s == "list": return events_list(c, a.calendar, a.cal_from, a.cal_to, a.on)
+        if s == "search": return events_search(c, a.query, a.calendar, a.cal_from, a.cal_to, a.on)
+        if s == "get": return events_get(c, a.uid, a.calendar)
+        if s == "shift":
+            return events_shift(c, a.uid, a.days, a.hours, a.minutes, a.calendar, a.series, a.etag)
         if s == "create":
             return events_create(c, a.summary, a.start, a.end, a.calendar, a.location, a.description)
         if s == "edit":
-            return events_edit(c, a.uid, a.calendar, a.summary, a.start, a.end, a.location, a.description, a.etag)
+            return events_edit(c, a.uid, a.calendar, a.summary, a.start, a.end, a.location, a.description,
+                               a.etag, a.series)
         if s == "delete": return item_delete(c, "VEVENT", a.uid, a.calendar)
     if cmd == "contacts":
-        if s == "list": return contacts_list(c, a.addressbook)
-        if s == "search": return contacts_search(c, a.query)
+        if s == "list": return contacts_list(c, a.addressbook, a.compact)
+        if s == "search": return contacts_search(c, a.query, a.addressbook, a.limit)
         if s == "get": return contacts_get(c, a.uid, a.addressbook, a.raw)
         if s == "create":
             return contacts_create(c, a.name, a.addressbook, a.email, a.phone, a.organization, a.title, a.note)

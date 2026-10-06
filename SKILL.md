@@ -70,16 +70,30 @@ $NC notes delete --id 12
 ## Calendar events
 
 Times without an offset are in the user's timezone (`NEXTCLOUD_TIMEZONE`). Use
-`YYYY-MM-DD HH:MM`, or `YYYY-MM-DD` for all-day.
+`YYYY-MM-DD HH:MM`, `YYYY-MM-DD` for all-day, or relative: `today`, `tomorrow`,
+`+3` (days), also with a time: `tomorrow 14:00`.
 
 ```bash
 $NC calendars list --type events
+$NC calendar search --query meeting --on tomorrow     # title/location/description
+$NC calendar search --query dentist                   # default: today .. +90 days
+$NC calendar list --on today
 $NC calendar list --from 2026-10-01 --to 2026-10-31 [--calendar Personal]
+$NC calendar get --uid <uid>
+$NC calendar shift --uid <uid> --days 1               # keeps duration; --hours/--minutes, negative = earlier
 $NC calendar create --summary "Dentist" --start "2026-10-20 09:30" --end "2026-10-20 10:00" [--location ..]
 $NC calendar create --summary "Day off" --start 2026-12-24     # all-day
 $NC calendar edit --uid <uid> --start "2026-10-20 11:00" --end "2026-10-20 11:30"
 $NC calendar delete --uid <uid>
 ```
+
+"Move my <event> <day>": `calendar search --query <word> --on <day>`. Exactly one
+hit: `calendar shift`. Several or none: show them and ask.
+
+Recurring events: results with `occurrence_of_series` or `recurring` belong to a
+series. Changing start/end (`shift`, `edit`) is refused unless `--series`, because
+that moves EVERY occurrence: ask the user first. A single occurrence cannot be
+moved with this tool; tell the user to use the calendar app.
 
 ## Tasks
 
@@ -96,12 +110,22 @@ Priority: 0 = none, 1 = highest, 9 = lowest.
 ## Contacts
 
 ```bash
-$NC contacts search --query jansen      # name, organization, e-mail, phone
+$NC contacts search --query henk                 # all text fields and phone numbers
+$NC contacts search --query "henk knol"           # space = ALL words (any order)
+$NC contacts search --query "doctor, physician"   # comma = ANY alternative
+$NC contacts list --compact                       # whole address book, names/org/title only
 $NC contacts get --uid <uid>
 $NC contacts create --name "Jan Jansen" --email a@b.nl --phone "06 12345678"
 $NC contacts edit --uid <uid> --email "new@b.nl"      # replaces ALL e-mail addresses
 $NC contacts export --uid <uid> --local ./jan.vcf
 ```
+
+Search ignores case and accents and ranks the best matches first. `matched_in`
+shows which field matched; a hit only in `note` or `url` may be a guess.
+
+Looking for a role ("my doctor", "the plumber"): search the word plus synonyms in
+the user's language and English in one go. Nothing? Read `contacts list --compact`
+and pick candidates yourself. Several or weak hits: show them and ask.
 
 Edits only change the fields you pass; everything else in an item (recurrence,
 alarms, addresses, photos, ...) is kept.

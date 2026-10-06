@@ -24,11 +24,11 @@ Python standard library only: no pip packages, no curl.
 
 **Notes:** List, find, read, create, edit, append to, and delete notes via the Nextcloud Notes API (requires the Notes app).
 
-**Calendar:** List calendars and events, create, edit, and delete events via CalDAV. Times are read in your configured timezone.
+**Calendar:** List, search, create, edit, shift, and delete events via CalDAV. Times are read in your configured timezone; relative dates like `tomorrow 14:00` work too. Recurring events are listed per occurrence, and a series is never moved by accident.
 
 **Tasks:** List (optionally only open), create, edit, complete, reopen, and delete tasks.
 
-**Contacts:** List, search, view, create, edit, delete, and export contacts via CardDAV.
+**Contacts:** List, search, view, create, edit, delete, and export contacts via CardDAV. Search covers all text fields, ignores case and accents, and ranks the best matches first.
 
 **Safe edits:** Editing an event, task, or contact changes only the fields you pass. Everything else (recurrence, alarms, subtasks, addresses, photos) is kept, and the item is written back to its own URL with an etag check, so concurrent changes are never silently overwritten.
 
@@ -87,6 +87,8 @@ NC="python3 ~/.hermes/skills/productivity/nextcloud/scripts/nextcloud_api.py"
 $NC check
 ```
 
+Dates: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, or relative: `today`, `tomorrow`, `+3` (days), also with a time (`tomorrow 14:00`). Dutch words (`vandaag`, `morgen`, `overmorgen`) work too.
+
 Every command prints one JSON object, `{"status": "success", "data": ...}` or `{"status": "error", "message": ...}`, and exits with code 1 on error.
 
 ### Files
@@ -120,6 +122,9 @@ $NC notes delete --id 941
 ```bash
 $NC calendars list --type events
 $NC calendar list --from 2026-07-01 --to 2026-07-31 [--calendar Work]
+$NC calendar list --on today
+$NC calendar search --query standup --on tomorrow     # default: today .. +90 days
+$NC calendar shift --uid <uid> --days 1               # keeps duration; --hours/--minutes too
 $NC calendar create --summary "Team standup" --start "2026-07-01 09:00" --end "2026-07-01 09:30"
 $NC calendar create --summary "Holiday" --start 2026-08-03          # all-day
 $NC calendar edit --uid <uid> --summary "New title"
@@ -143,6 +148,9 @@ $NC tasks delete --uid <uid>
 $NC addressbooks list
 $NC contacts list [--addressbook Contacts]
 $NC contacts search --query jansen
+$NC contacts search --query "jan jansen"              # all words must match
+$NC contacts search --query "doctor, physician"       # any of the alternatives
+$NC contacts list --compact                           # names/organization/title only
 $NC contacts get --uid <uid>
 $NC contacts create --name "Jan Jansen" --email jan@example.com --phone "+31 6 12345678"
 $NC contacts edit --uid <uid> --email new@example.com   # replaces all e-mail addresses
