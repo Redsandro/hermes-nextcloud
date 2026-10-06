@@ -20,7 +20,7 @@ Python standard library only: no pip packages, no curl.
 
 ## Features
 
-**Files:** List, search, read, upload, append, download, move, and delete files via WebDAV. Writes can be made conditional on the file's etag.
+**Files:** List, search, read, upload, append, download, move, and delete files via WebDAV. Overwriting an existing file requires its etag (or `--overwrite`).
 
 **Notes:** List, find, read, create, edit, append to, and delete notes via the Nextcloud Notes API (requires the Notes app).
 
@@ -30,7 +30,7 @@ Python standard library only: no pip packages, no curl.
 
 **Contacts:** List, search, view, create, edit, delete, and export contacts via CardDAV. Search covers all text fields, ignores case and accents, and ranks the best matches first.
 
-**Safe edits:** Editing an event, task, or contact changes only the fields you pass. Everything else (recurrence, alarms, subtasks, addresses, photos) is kept, and the item is written back to its own URL with an etag check, so concurrent changes are never silently overwritten.
+**Safe edits:** Editing an event, task, or contact changes only the fields you pass. Everything else (recurrence, alarms, subtasks, addresses, photos) is kept, and the item is written back to its own URL with an etag check. Replacing a whole file or note requires the etag from when it was read (or an explicit `--overwrite` / `--force`). Concurrent changes are never silently overwritten.
 
 **Setup:** Guided setup validates your URL, login, and app password and stores them in a private file.
 
@@ -103,7 +103,7 @@ $NC files search --query budget
 $NC files get --path /Notes/todo.md                      # content + etag
 $NC files append --path /Notes/todo.md --text "- [ ] milk"
 $NC files upload --path /Notes/todo.md --content - --if-match '<etag>' < todo.md
-$NC files upload --remote /Documents/report.pdf --local ./report.pdf
+$NC files upload --remote /Documents/report.pdf --local ./report.pdf   # new file; --overwrite to replace
 $NC files download --remote /Documents/report.pdf --local ./report.pdf
 $NC files move --src /a.txt --dst /b.txt
 $NC files delete --path /Documents/old.txt
@@ -117,7 +117,7 @@ $NC notes find --query meeting
 $NC notes get --id 941              # content + etag
 $NC notes create --title "Meeting notes" --content "Discussed the Q3 roadmap."
 $NC notes append --id 941 --text "Follow up next week."
-$NC notes edit --id 941 --content - --etag <etag> < note.md
+$NC notes edit --id 941 --content - --etag <etag> < note.md   # --etag required (or --force)
 $NC notes delete --id 941
 ```
 

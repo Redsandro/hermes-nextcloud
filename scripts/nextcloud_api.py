@@ -115,7 +115,7 @@ _STATUS_HINTS = {
     405: "Method not allowed here (405).",
     409: "Conflict (409): parent folder probably does not exist.",
     412: "Precondition failed (412): the item was changed by someone else since it was read, "
-         "or it already exists. Read it again and retry.",
+         "or it already exists. Read it again and redo your change on the new version.",
     423: "Locked (423): the item is locked by another client.",
     507: "Insufficient storage (507): quota exceeded.",
 }
@@ -566,13 +566,21 @@ def files_get(c, path):
     return {"path": path, "content": text, "etag": h.get("ETag", "") if h else ""}
 
 
-def files_put(c, path, data, if_match=None, no_overwrite=False):
+def files_put(c, path, data, if_match=None, overwrite=False):
+    """Default: create only (fails if the file exists). if_match: overwrite only
+    if unchanged since read. overwrite: replace blindly."""
     headers = {"Content-Type": "application/octet-stream"}
     if if_match:
         headers["If-Match"] = if_match if if_match.startswith('"') else f'"{if_match}"'
-    if no_overwrite:
+    elif not overwrite:
         headers["If-None-Match"] = "*"
-    status, h, _ = c.request("PUT", c.dav_path(path), data, headers, ok=(200, 201, 204))
+    try:
+        status, h, _ = c.request("PUT", c.dav_path(path), data, headers, ok=(200, 201, 204))
+    except NCError as e:
+        if e.status == 412 and not if_match:
+            raise NCError("File already exists (412): 'files get' it and upload with --if-match <etag>, "
+                          "or --overwrite to replace it unseen.", 412)
+        raise
     return {"path": path, "uploaded": True, "created": status == 201,
             "etag": (h.get("ETag") or h.get("OC-ETag") or "") if h else ""}
 
@@ -585,7 +593,7 @@ def files_append(c, path, text, retries=3):
         except NCError as e:
             if e.status != 404:
                 raise
-            res = files_put(c, path, (text.rstrip("\n") + "\n").encode("utf-8"), no_overwrite=True)
+            res = files_put(c, path, (text.rstrip("\n") + "\n").encode("utf-8"))
             res["appended"] = True
             return res
         if cur.get("binary"):
@@ -595,7 +603,7 @@ def files_append(c, path, text, retries=3):
             content += "\n"
         new = content + text.rstrip("\n") + "\n"
         try:
-            res = files_put(c, path, new.encode("utf-8"), if_match=cur["etag"] or None)
+            res = files_put(c, path, new.encode("utf-8"), if_match=cur["etag"], overwrite=not cur["etag"])
             res["appended"] = True
             return res
         except NCError as e:
@@ -703,11 +711,12 @@ def notes_create(c, title, content, category=None):
     return _json(body)
 
 
-def notes_edit(c, note_id, title=None, content=None, category=None, etag=None):
-    """Update only the given fields. With --etag the edit fails (412) if the note
-    changed after you read it; without it the current etag is used."""
-    if etag is None:
-        etag = notes_get(c, note_id).get("etag", "")
+def notes_edit(c, note_id, title=None, content=None, category=None, etag=None, force=False):
+    """Update only the given fields. Replacing content needs the etag from the read
+    the new content is based on (412 if the note changed since), or force."""
+    if content is not None and not etag and not force:
+        raise NCError("Replacing content needs --etag <etag> from the 'notes get' your change is based on "
+                      "(or --force to overwrite unseen).")
     payload = {}
     if title is not None:
         payload["title"] = title
@@ -731,7 +740,7 @@ def notes_append(c, note_id, text, retries=3):
         if content and not content.endswith("\n"):
             content += "\n"
         try:
-            return notes_edit(c, note_id, content=content + text.rstrip("\n") + "\n", etag=note.get("etag"))
+            return notes_edit(c, note_id, content=content + text.rstrip("\n") + "\n", etag=note.get("etag"), force=True)
         except NCError as e:
             if e.status != 412:
                 raise
@@ -1652,12 +1661,14 @@ def build_parser():
     x = f.add_parser("list"); x.add_argument("--path", default="/")
     x = f.add_parser("get", help="Print a text file (with etag)"); x.add_argument("--path", "--remote", required=True)
     x = f.add_parser("download"); x.add_argument("--path", "--remote", required=True); x.add_argument("--local", required=True)
-    x = f.add_parser("upload", help="Create/overwrite a file")
+    x = f.add_parser("upload", help="Create a file; overwrite needs --if-match or --overwrite")
     x.add_argument("--path", "--remote", required=True)
     x.add_argument("--content", help="Text, or '-' to read stdin")
     x.add_argument("--content-file", "--local", dest="content_file")
-    x.add_argument("--if-match", help="Only overwrite if the etag still matches (from 'files get')")
-    x.add_argument("--no-overwrite", action="store_true", help="Fail if the file already exists")
+    w = x.add_mutually_exclusive_group()
+    w.add_argument("--if-match", help="Overwrite only if the etag (from 'files get') still matches")
+    w.add_argument("--overwrite", action="store_true", help="Replace an existing file unseen")
+    w.add_argument("--no-overwrite", action="store_true", help=argparse.SUPPRESS)  # now the default
     x = f.add_parser("append", help="Append text as new line(s); creates the file if missing")
     x.add_argument("--path", "--remote", required=True); x.add_argument("--text", required=True)
     x = f.add_parser("mkdir"); x.add_argument("--path", required=True)
@@ -1675,7 +1686,8 @@ def build_parser():
     x.add_argument("--content", default=""); x.add_argument("--content-file"); x.add_argument("--category")
     x = n.add_parser("edit"); x.add_argument("--id", required=True, type=int); x.add_argument("--title")
     x.add_argument("--content", help="Text, or '-' for stdin"); x.add_argument("--content-file")
-    x.add_argument("--category"); x.add_argument("--etag", help="etag from 'notes get' (safe concurrent edit)")
+    x.add_argument("--category"); x.add_argument("--etag", help="etag from 'notes get'; required with --content")
+    x.add_argument("--force", action="store_true", help="Replace content without --etag")
     x = n.add_parser("append"); x.add_argument("--id", required=True, type=int); x.add_argument("--text", required=True)
     x = n.add_parser("delete"); x.add_argument("--id", required=True, type=int)
 
@@ -1758,7 +1770,7 @@ def dispatch(c, a):
                 fh.write(body)
             return {"path": a.path, "local": a.local, "size": len(body), "downloaded": True}
         if s == "upload":
-            return files_put(c, a.path, read_content(a.content, a.content_file), a.if_match, a.no_overwrite)
+            return files_put(c, a.path, read_content(a.content, a.content_file), a.if_match, a.overwrite)
         if s == "append": return files_append(c, a.path, a.text)
         if s == "mkdir": return files_mkdir(c, a.path)
         if s == "delete": return files_delete(c, a.path)
@@ -1775,7 +1787,7 @@ def dispatch(c, a):
             content = None
             if a.content is not None or a.content_file:
                 content = read_content(a.content, a.content_file).decode("utf-8")
-            return notes_edit(c, a.id, a.title, content, a.category, a.etag)
+            return notes_edit(c, a.id, a.title, content, a.category, a.etag, a.force)
         if s == "append": return notes_append(c, a.id, a.text)
         if s == "delete": return notes_delete(c, a.id)
     if cmd == "calendars" and s == "list":
