@@ -87,9 +87,10 @@ $NC calendar list --on today
 $NC calendar list --from 2026-10-01 --to 2026-10-31 [--calendar Personal]
 $NC calendar get --uid <uid>
 $NC calendar shift --uid <uid> --days 1               # keeps duration; --hours/--minutes, negative = earlier
-$NC calendar create --summary "Dentist" --start "2026-10-20 09:30" --end "2026-10-20 10:00" [--location ..]
+$NC calendar create --summary "Dentist" --start "2026-10-20 09:30" --end "2026-10-20 10:00" [--location ..] [--remind 2d --remind 1d:email]
 $NC calendar create --summary "Day off" --start 2026-12-24     # all-day
 $NC calendar edit --uid <uid> --start "2026-10-20 11:00" --end "2026-10-20 11:30"
+$NC calendar edit --uid <uid> --remind 1h             # replaces all reminders; --remind "" removes them
 $NC calendar delete --uid <uid>
 ```
 
@@ -112,12 +113,19 @@ series. Changing start/end (`shift`, `edit`) is refused unless `--series`, becau
 that moves EVERY occurrence: ask the user first. A single occurrence cannot be
 moved with this tool; tell the user to use the calendar app.
 
+Reminders are part of the event or task (`--remind`, repeatable): never create a
+separate event for them. `15m` / `1h` / `2d` / `1w` before start (tasks: before due);
+push by default, `:email` for e-mail. All-day: `2d` = 2 days before at 09:00.
+Reminders are not per user: the calendar owner and everyone with write access get
+them, read-only sharees don't. So set them on the event in the calendar it belongs
+to; never copy an event to another calendar to get a reminder.
+
 ## Tasks
 
 ```bash
 $NC calendars list --type tasks
 $NC tasks list --open [--calendar Tasks]
-$NC tasks create --title "Tax return" --due 2026-10-31 [--priority 1] [--calendar Tasks]
+$NC tasks create --title "Tax return" --due 2026-10-31 [--priority 1] [--remind 1w] [--calendar Tasks]
 $NC tasks edit --uid <uid> --title "..." [--due ""]    # "" removes the due date
 $NC tasks complete|reopen|delete --uid <uid>
 ```

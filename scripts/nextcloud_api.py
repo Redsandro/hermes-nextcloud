@@ -362,8 +362,9 @@ def props_dict(lines, block):
     return d
 
 
-def modify_component(text, comp, remove=(), add=()):
+def modify_component(text, comp, remove=(), add=(), alarms=None):
     """Remove properties (by name) from the master <comp> and append new lines.
+    alarms (list of lines) replaces the master's VALARMs; None keeps them.
 
     Everything else in the item stays byte-for-byte the same (apart from line
     folding), including nested components and unknown properties.
@@ -374,21 +375,137 @@ def modify_component(text, comp, remove=(), add=()):
         raise NCError(f"No {comp} component found in item")
     b, e = block
     remove = {r.upper() for r in remove}
-    new_inner, depth = [], 0
+    new_inner, depth, in_alarm = [], 0, False
     for l in lines[b + 1:e]:
         u = l.strip().upper()
         if u.startswith("BEGIN:"):
             depth += 1
+            if depth == 1 and u == "BEGIN:VALARM" and alarms is not None:
+                in_alarm = True
         elif u.startswith("END:"):
             depth -= 1
+            if in_alarm and depth == 0:
+                in_alarm = False
+                continue
         elif depth == 0 and split_prop(l)[0] in remove:
             continue
-        new_inner.append(l)
+        if not in_alarm:
+            new_inner.append(l)
     # Put new properties before any nested components (VALARM), which is tidy.
     insert_at = next((i for i, l in enumerate(new_inner) if l.strip().upper().startswith("BEGIN:")),
                      len(new_inner))
     new_inner[insert_at:insert_at] = list(add)
+    new_inner += list(alarms or [])
     return serialize(lines[:b + 1] + new_inner + lines[e:])
+
+
+# -- reminders (VALARM) ---------------------------------------------------------
+# Spec: "<n><m|h|d|w>[:email]" before the start (tasks: before due). On all-day
+# items "<n>d" means n days before at 09:00, like the Nextcloud calendar app.
+
+ALLDAY_HOUR_MIN = 9 * 60
+
+
+def parse_reminders(specs):
+    """--remind values -> [(minutes_before, days_or_None, action)]; [] = remove all."""
+    out = []
+    for spec in specs or []:
+        for part in spec.split(","):
+            part = part.strip().lower()
+            if not part:
+                continue
+            m = re.fullmatch(r"(\d+)\s*([mhdw])(?::(email|push))?", part)
+            if not m:
+                raise NCError(f"Bad reminder {part!r}: use e.g. 15m, 1h, 2d, 1w, add :email for e-mail")
+            n, unit = int(m.group(1)), m.group(2)
+            days = n * 7 if unit == "w" else n if unit == "d" else None
+            mins = n * {"m": 1, "h": 60, "d": 1440, "w": 10080}[unit]
+            out.append((mins, days, "EMAIL" if m.group(3) == "email" else "DISPLAY"))
+    return out
+
+
+def _duration(minutes):
+    """Signed minutes -> iCal duration ('-P1DT15H')."""
+    sign = "-" if minutes < 0 else ""
+    d, rest = divmod(abs(minutes), 1440)
+    h, m = divmod(rest, 60)
+    t = (f"{h}H" if h else "") + (f"{m}M" if m else "")
+    v = (f"{d}D" if d else "") + (f"T{t}" if t else "")
+    return f"{sign}P{v}" if v else "PT0S"
+
+
+def alarm_lines(reminders, all_day, summary, related_end=False):
+    lines = []
+    for mins, days, action in reminders:
+        before = days * 1440 - ALLDAY_HOUR_MIN if all_day and days is not None else mins
+        rel = ";RELATED=END" if related_end else ""
+        lines += ["BEGIN:VALARM", f"ACTION:{action}", f"TRIGGER{rel}:{_duration(-before)}",
+                  _text_prop("DESCRIPTION", summary or "Reminder")]
+        if action == "EMAIL":
+            lines.append(_text_prop("SUMMARY", summary or "Reminder"))
+        lines.append("END:VALARM")
+    return lines
+
+
+def _parse_duration(v):
+    m = re.fullmatch(r"([+-])?P(?:(\d+)W)?(?:(\d+)D)?(?:T(?:(\d+)H)?(?:(\d+)M)?(?:(\d+)S)?)?", v.strip())
+    if not m:
+        return None
+    w, d, h, mi, sec = (int(x or 0) for x in m.groups()[1:])
+    total = w * 10080 + d * 1440 + h * 60 + mi + sec // 60
+    return -total if m.group(1) == "-" else total
+
+
+def _fmt_minutes(n):
+    for size, unit in ((1440, "d"), (60, "h")):
+        if n and n % size == 0:
+            return f"{n // size}{unit}"
+    return f"{n}m"
+
+
+def read_reminders(lines, block, all_day, tzname, task=False):
+    """VALARMs directly in the block -> ['2d', '1h:email', ...] (same syntax as --remind)."""
+    out, cur, depth = [], None, 0
+    b, e = block
+    for l in lines[b + 1:e]:
+        u = l.strip().upper()
+        if u.startswith("BEGIN:"):
+            depth += 1
+            if depth == 1 and u == "BEGIN:VALARM":
+                cur = {}
+        elif u.startswith("END:"):
+            depth -= 1
+            if depth == 0 and cur is not None:
+                out.append(_fmt_alarm(cur, all_day, tzname, task))
+                cur = None
+        elif cur is not None and depth == 1:
+            name, params, value = split_prop(l)
+            cur.setdefault(name, (params, value))
+    return [r for r in out if r]
+
+
+def _fmt_alarm(a, all_day, tzname, task=False):
+    action = a.get("ACTION", ("", "DISPLAY"))[1].upper()
+    params, value = a.get("TRIGGER", ("", ""))
+    if not value:
+        return ""
+    if "DATE-TIME" in params.upper():
+        txt = "at " + display_dt("", value, tzname)
+    else:
+        mins = _parse_duration(value)
+        if mins is None:
+            return value
+        before = -mins
+        if all_day and (before + ALLDAY_HOUR_MIN) % 1440 == 0 and before + ALLDAY_HOUR_MIN >= 0:
+            txt = f"{(before + ALLDAY_HOUR_MIN) // 1440}d"
+        elif before >= 0:
+            txt = _fmt_minutes(before)
+        else:
+            txt = _fmt_minutes(-before) + " after"
+        # Normal: events relative to start, tasks relative to due (RELATED=END).
+        if ("RELATED=END" in params.upper()) != task:
+            txt += (" before " if before >= 0 else " ") + ("start" if task else "end")
+    return txt + {"DISPLAY": "", "EMAIL": ":email"}.get(action, f":{action.lower()}")
 
 
 # -- dates --------------------------------------------------------------------
@@ -901,8 +1018,11 @@ def _item_from_block(c, lines, block, comp, cal, href, etag):
         item["categories"] = first("CATEGORIES")
     if p.get("RELATED-TO"):
         item["parent"] = first("RELATED-TO", False)
+    key = "DTSTART" if comp == "VEVENT" else "DUE"
+    all_day = bool(p.get(key)) and ("VALUE=DATE" in p[key][0][0].upper() or len(p[key][0][1]) == 8)
+    item["reminders"] = read_reminders(lines, block, all_day, c.tz, comp == "VTODO")
     item.update({"calendar": cal["name"], "href": href, "etag": etag})
-    return {k: v for k, v in item.items() if v != ""}
+    return {k: v for k, v in item.items() if v not in ("", [])}
 
 
 def items_list(c, comp, calendar=None, start=None, end=None):
@@ -992,7 +1112,11 @@ def tasks_list(c, calendar=None, open_only=False):
     return items
 
 
-def tasks_create(c, title, calendar=None, due=None, priority=None, description=None, categories=None):
+def tasks_create(c, title, calendar=None, due=None, priority=None, description=None, categories=None,
+                 remind=None):
+    reminders = parse_reminders(remind)
+    if reminders and not due:
+        raise NCError("Task reminders need --due (they are relative to the due date)")
     cal = pick_calendar(c, "VTODO", calendar, TASK_CAL_PREFERENCE)
     uid = str(uuid.uuid4())
     now = now_utc()
@@ -1006,13 +1130,16 @@ def tasks_create(c, title, calendar=None, due=None, priority=None, description=N
         lines.append(_text_prop("DESCRIPTION", description))
     if categories:
         lines.append("CATEGORIES:" + ",".join(ical_escape(x.strip()) for x in categories.split(",") if x.strip()))
+    if reminders:
+        lines += alarm_lines(reminders, parse_user_dt(due, c.tz)[2], title, related_end=True)
     lines.append("END:VTODO")
     href = _new_href(cal, uid)
     etag = _put_item(c, href, _wrap_vcalendar(lines), create=True)
-    return {"uid": uid, "summary": title, "calendar": cal["name"], "href": href, "etag": etag, "created": True}
+    return {"uid": uid, "summary": title, "calendar": cal["name"], "href": href, "etag": etag, "created": True,
+            **({"reminders": [r for r in remind if r]} if reminders else {})}
 
 
-def _edit_item(c, comp, uid, calendar, etag, remove, add, found=None):
+def _edit_item(c, comp, uid, calendar, etag, remove, add, found=None, alarms=None):
     cal, href, cur_etag, ics = found or find_item(c, comp, uid, calendar)
     remove = set(remove) | {"DTSTAMP", "LAST-MODIFIED"}
     add = list(add) + [f"DTSTAMP:{now_utc()}", f"LAST-MODIFIED:{now_utc()}"]
@@ -1021,7 +1148,7 @@ def _edit_item(c, comp, uid, calendar, etag, remove, add, found=None):
         seq = props_dict(lines, master_block(lines, comp)).get("SEQUENCE", [("", "0")])[0][1]
         remove.add("SEQUENCE")
         add.append(f"SEQUENCE:{int(seq) + 1 if seq.isdigit() else 1}")
-    new_ics = modify_component(ics, comp, remove, add)
+    new_ics = modify_component(ics, comp, remove, add, alarms)
     new_etag = _put_item(c, href, new_ics, etag or cur_etag)
     item = _cal_item(c, href, new_etag, new_ics, comp, cal)
     item["updated"] = True
@@ -1029,7 +1156,7 @@ def _edit_item(c, comp, uid, calendar, etag, remove, add, found=None):
 
 
 def tasks_edit(c, uid, calendar=None, title=None, due=None, priority=None, description=None,
-               categories=None, etag=None):
+               categories=None, etag=None, remind=None):
     remove, add = set(), []
     if title is not None:
         remove.add("SUMMARY"); add.append(_text_prop("SUMMARY", title))
@@ -1049,9 +1176,47 @@ def tasks_edit(c, uid, calendar=None, title=None, due=None, priority=None, descr
         remove.add("CATEGORIES")
         if categories.strip():
             add.append("CATEGORIES:" + ",".join(ical_escape(x.strip()) for x in categories.split(",") if x.strip()))
-    if not remove:
+    found = alarms = None
+    if remind is not None or due is not None:
+        found = find_item(c, "VTODO", uid, calendar)
+        alarms = _new_alarms(c, found[3], "VTODO", "DUE", due, title, remind, related_end=True)
+    if not remove and alarms is None:
         raise NCError("Nothing to change")
-    return _edit_item(c, "VTODO", uid, calendar, etag, remove, add)
+    return _edit_item(c, "VTODO", uid, calendar, etag, remove, add, found=found, alarms=alarms)
+
+
+def _new_alarms(c, ics, comp, key, new_value, new_summary, remind, related_end=False):
+    """VALARM lines for an edit, or None to keep the current ones. Re-creates the
+    current reminders when the item switches between all-day and timed."""
+    lines = unfold(ics)
+    block = master_block(lines, comp)
+    p = props_dict(lines, block)
+    cur = p.get(key)
+    was_all_day = bool(cur) and ("VALUE=DATE" in cur[0][0].upper() or len(cur[0][1]) == 8)
+    if new_value is None:
+        has_value, all_day = bool(cur), was_all_day
+    else:
+        has_value = bool(new_value.strip())
+        all_day = has_value and parse_user_dt(new_value, c.tz)[2]
+    if remind is None:
+        if new_value is None or all_day == was_all_day:
+            return None
+        existing = read_reminders(lines, block, was_all_day, c.tz, comp == "VTODO")
+        if not existing:
+            return None
+        if not has_value:
+            raise NCError("This task has reminders: remove them too with --remind ''")
+        try:
+            reminders = parse_reminders(existing)
+        except NCError:
+            return None  # unusual reminders (absolute, after): leave them as they are
+    else:
+        reminders = parse_reminders(remind)
+    if reminders and not has_value:
+        raise NCError("Task reminders need a due date (they are relative to it)")
+    summary = new_summary if new_summary is not None else (
+        ical_unescape(p["SUMMARY"][0][1]) if p.get("SUMMARY") else "")
+    return alarm_lines(reminders, all_day, summary, related_end)
 
 
 def tasks_complete(c, uid, calendar=None):
@@ -1204,7 +1369,8 @@ def events_shift(c, uid, days=0, hours=0, minutes=0, calendar=None, series=False
     return item
 
 
-def events_create(c, summary, start, end=None, calendar=None, location=None, description=None):
+def events_create(c, summary, start, end=None, calendar=None, location=None, description=None, remind=None):
+    reminders = parse_reminders(remind)
     cal = pick_calendar(c, "VEVENT", calendar, ("personal", "persoonlijk"))
     sp, sv, s_is_date = parse_user_dt(start, c.tz)
     if end:
@@ -1225,16 +1391,17 @@ def events_create(c, summary, start, end=None, calendar=None, location=None, des
         lines.append(_text_prop("LOCATION", location))
     if description:
         lines.append(_text_prop("DESCRIPTION", description))
+    lines += alarm_lines(reminders, s_is_date, summary)
     lines.append("END:VEVENT")
     href = _new_href(cal, uid)
     etag = _put_item(c, href, _wrap_vcalendar(lines), create=True)
     return {"uid": uid, "summary": summary, "start": display_dt(sp, sv, c.tz),
             "end": display_dt(ep, ev, c.tz), "calendar": cal["name"], "href": href, "etag": etag,
-            "created": True}
+            "created": True, **({"reminders": [r for r in remind if r]} if reminders else {})}
 
 
 def events_edit(c, uid, calendar=None, summary=None, start=None, end=None, location=None,
-                description=None, etag=None, series=False):
+                description=None, etag=None, series=False, remind=None):
     remove, add = set(), []
     if summary is not None:
         remove.add("SUMMARY"); add.append(_text_prop("SUMMARY", summary))
@@ -1250,9 +1417,10 @@ def events_edit(c, uid, calendar=None, summary=None, start=None, end=None, locat
         remove.add("DESCRIPTION")
         if description:
             add.append(_text_prop("DESCRIPTION", description))
-    if not remove:
+    if not remove and remind is None:
         raise NCError("Nothing to change")
     found = find_item(c, "VEVENT", uid, calendar)
+    alarms = _new_alarms(c, found[3], "VEVENT", "DTSTART", start, summary, remind)
     if (start is not None or end is not None) and not series:
         lines = unfold(found[3])
         if _is_recurring(lines, master_block(lines, "VEVENT")):
@@ -1260,7 +1428,7 @@ def events_edit(c, uid, calendar=None, summary=None, start=None, end=None, locat
                 "This is a RECURRING event: changing start/end changes the WHOLE series. Ask the user "
                 "first; if they want that, repeat with --series. A single occurrence cannot be moved "
                 "with this tool (use the calendar app).")
-    return _edit_item(c, "VEVENT", uid, calendar, etag, remove, add, found=found)
+    return _edit_item(c, "VEVENT", uid, calendar, etag, remove, add, found=found, alarms=alarms)
 
 
 # ---------------------------------------------------------------------------
@@ -1700,11 +1868,11 @@ def build_parser():
     x = t.add_parser("list"); x.add_argument("--calendar"); x.add_argument("--open", action="store_true")
     x = t.add_parser("create"); x.add_argument("--title", "--summary", required=True); x.add_argument("--calendar")
     x.add_argument("--due"); x.add_argument("--priority", type=int); x.add_argument("--description")
-    x.add_argument("--categories")
+    x.add_argument("--categories"); x.add_argument("--remind", action="append", help="Reminder before due, e.g. 2d, 1h, 15m, 1d:email; repeatable")
     x = t.add_parser("edit"); x.add_argument("--uid", required=True); x.add_argument("--calendar")
     x.add_argument("--title", "--summary"); x.add_argument("--due", help="'' removes the due date")
     x.add_argument("--priority", type=int); x.add_argument("--description"); x.add_argument("--categories")
-    x.add_argument("--etag")
+    x.add_argument("--etag"); x.add_argument("--remind", action="append", help="Reminder before due, replaces all; "" removes all. E.g. 2d, 1h, 15m, 1d:email; repeatable")
     for name in ("complete", "reopen", "delete"):
         x = t.add_parser(name); x.add_argument("--uid", required=True); x.add_argument("--calendar")
 
@@ -1726,10 +1894,12 @@ def build_parser():
     x.add_argument("--etag")
     x = e.add_parser("create"); x.add_argument("--summary", required=True); x.add_argument("--start", required=True)
     x.add_argument("--end"); x.add_argument("--calendar"); x.add_argument("--location"); x.add_argument("--description")
+    x.add_argument("--remind", action="append", help="Reminder before start, e.g. 2d, 1h, 15m, 1d:email; repeatable")
     x = e.add_parser("edit"); x.add_argument("--uid", required=True); x.add_argument("--calendar")
     x.add_argument("--summary"); x.add_argument("--start"); x.add_argument("--end")
     x.add_argument("--location"); x.add_argument("--description"); x.add_argument("--etag")
     x.add_argument("--series", action="store_true", help="Required to change start/end of a recurring series")
+    x.add_argument("--remind", action="append", help="Reminder before start, replaces all; "" removes all. E.g. 2d, 1h, 15m, 1d:email; repeatable")
     x = e.add_parser("delete"); x.add_argument("--uid", required=True); x.add_argument("--calendar")
 
     # contacts
@@ -1794,9 +1964,10 @@ def dispatch(c, a):
         return calendars_list(c, {"events": "VEVENT", "tasks": "VTODO"}.get(a.type))
     if cmd == "tasks":
         if s == "list": return tasks_list(c, a.calendar, a.open)
-        if s == "create": return tasks_create(c, a.title, a.calendar, a.due, a.priority, a.description, a.categories)
+        if s == "create": return tasks_create(c, a.title, a.calendar, a.due, a.priority, a.description, a.categories, a.remind)
         if s == "edit":
-            return tasks_edit(c, a.uid, a.calendar, a.title, a.due, a.priority, a.description, a.categories, a.etag)
+            return tasks_edit(c, a.uid, a.calendar, a.title, a.due, a.priority, a.description, a.categories, a.etag,
+                              a.remind)
         if s == "complete": return tasks_complete(c, a.uid, a.calendar)
         if s == "reopen": return tasks_reopen(c, a.uid, a.calendar)
         if s == "delete": return item_delete(c, "VTODO", a.uid, a.calendar)
@@ -1807,10 +1978,10 @@ def dispatch(c, a):
         if s == "shift":
             return events_shift(c, a.uid, a.days, a.hours, a.minutes, a.calendar, a.series, a.etag)
         if s == "create":
-            return events_create(c, a.summary, a.start, a.end, a.calendar, a.location, a.description)
+            return events_create(c, a.summary, a.start, a.end, a.calendar, a.location, a.description, a.remind)
         if s == "edit":
             return events_edit(c, a.uid, a.calendar, a.summary, a.start, a.end, a.location, a.description,
-                               a.etag, a.series)
+                               a.etag, a.series, a.remind)
         if s == "delete": return item_delete(c, "VEVENT", a.uid, a.calendar)
     if cmd == "contacts":
         if s == "list": return contacts_list(c, a.addressbook, a.compact)

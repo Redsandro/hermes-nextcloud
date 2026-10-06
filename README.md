@@ -24,9 +24,9 @@ Python standard library only: no pip packages, no curl.
 
 **Notes:** List, find, read, create, edit, append to, and delete notes via the Nextcloud Notes API (requires the Notes app).
 
-**Calendar:** List, search, create, edit, shift, and delete events via CalDAV. Times are read in your configured timezone; relative dates like `tomorrow 14:00` work too. Recurring events are listed per occurrence, and a series is never moved by accident.
+**Calendar:** List, search, create, edit, shift, and delete events via CalDAV. Times are read in your configured timezone; relative dates like `tomorrow 14:00` work too. Recurring events are listed per occurrence, and a series is never moved by accident. Reminders (push or e-mail, as many as you like) are set on the event itself.
 
-**Tasks:** List (optionally only open), create, edit, complete, reopen, and delete tasks.
+**Tasks:** List (optionally only open), create, edit, complete, reopen, and delete tasks, with reminders before the due date.
 
 **Contacts:** List, search, view, create, edit, delete, and export contacts via CardDAV. Search covers all text fields, ignores case and accents, and ranks the best matches first.
 
@@ -91,6 +91,8 @@ $NC check
 
 Dates: `YYYY-MM-DD`, `YYYY-MM-DD HH:MM`, or relative: `today`, `tomorrow`, `+90` / `-365` (days), also with a time (`tomorrow 14:00`). Dutch words (`vandaag`, `morgen`, `overmorgen`) work too.
 
+Reminders: `15m`, `1h`, `2d`, `1w` before the start (tasks: before the due date), push by default, `:email` for e-mail. On all-day items `2d` means 2 days before at 09:00. Reminders are stored in the event, not per user: Nextcloud sends them to the calendar owner and everyone with write access (an admin setting, on by default), not to read-only sharees. E-mail reminders need working background jobs (cron) and mail settings on the server.
+
 `calendar list` and `calendar search` always cover a limited period, by default 30 days back to 90 days ahead, and return `{"from", "to", "events"}`.
 
 Every command prints one JSON object, `{"status": "success", "data": ...}` or `{"status": "error", "message": ...}`, and exits with code 1 on error.
@@ -131,8 +133,10 @@ $NC calendar search --query standup --on tomorrow
 $NC calendar search --query dentist --from +90 --to +365
 $NC calendar shift --uid <uid> --days 1               # keeps duration; --hours/--minutes too
 $NC calendar create --summary "Team standup" --start "2026-07-01 09:00" --end "2026-07-01 09:30"
+$NC calendar create --summary "Dentist" --start "2026-07-02 10:00" --end "2026-07-02 10:30" --remind 2d --remind 1d:email
 $NC calendar create --summary "Holiday" --start 2026-08-03          # all-day
 $NC calendar edit --uid <uid> --summary "New title"
+$NC calendar edit --uid <uid> --remind 1h             # replaces all reminders; --remind "" removes them
 $NC calendar delete --uid <uid>
 ```
 
@@ -140,7 +144,7 @@ $NC calendar delete --uid <uid>
 
 ```bash
 $NC tasks list --open
-$NC tasks create --title "Review pull request" --due 2026-07-05 [--priority 1]
+$NC tasks create --title "Review pull request" --due 2026-07-05 [--priority 1] [--remind 1d]
 $NC tasks edit --uid <uid> --title "Updated title"
 $NC tasks complete --uid <uid>
 $NC tasks reopen --uid <uid>
