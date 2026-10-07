@@ -1,6 +1,6 @@
 ---
 name: nextcloud
-description: For any of the user's own notes, lists, files, calendar events, tasks or contacts, including new notes: lists, todo, ideas. They live in Nextcloud (WebDAV / Notes / CalDAV / CardDAV).
+description: Use this skill for interacting with Nextcloud; access and manage notes, files, calendar events, tasks or contacts.
 version: 2.0.0
 author: Hermes Agent
 license: MIT
