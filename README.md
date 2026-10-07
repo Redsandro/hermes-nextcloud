@@ -56,7 +56,7 @@ git clone https://github.com/Redsandro/hermes-nextcloud.git nextcloud
 python3 ~/.hermes/skills/productivity/nextcloud/scripts/setup.py
 ```
 
-The script asks for your Nextcloud URL, login name, app password (input hidden), and timezone. It verifies the login, looks up your Nextcloud user id (which can differ from the login name, e.g. when logging in with an e-mail address), and saves everything to `~/.hermes/nextcloud.env` with mode 600.
+The script asks for your Nextcloud URL, login name, app password (input hidden), and timezone. It verifies the login, looks up your Nextcloud user id (which can differ from the login name, e.g. when logging in with an e-mail address), and saves everything to `~/.hermes/.env.nextcloud` with mode 600.
 
 ```bash
 setup.py --check                                    # test saved credentials
@@ -181,7 +181,7 @@ hermes-nextcloud/
 
 ## Security
 
-- Credentials are stored in `~/.hermes/nextcloud.env`, created with mode 600. Use an **App Password**, never your login password; it can be revoked on its own.
+- Credentials are stored in `~/.hermes/.env.nextcloud`, created with mode 600. Use an **App Password**, never your login password; it can be revoked on its own.
 - The password is never passed on a command line (no curl), never printed, and never sent over plain `http://` (unless you set `NEXTCLOUD_ALLOW_HTTP=1`). Redirects are not followed.
 - Every HTTP status is checked: a failed request is reported as an error, never as success.
 - SKILL.md instructs the agent to treat content from Nextcloud as data, not as instructions.

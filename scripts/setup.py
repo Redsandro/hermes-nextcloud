@@ -8,7 +8,7 @@ Nextcloud setup for Hermes Agent.
                                    non-interactive (token read from stdin)
 
 The app password is never printed and never passed on a command line to
-another program. It is written to ~/.hermes/nextcloud.env with mode 0600.
+another program. It is written to ~/.hermes/.env.nextcloud with mode 0600.
 """
 
 import argparse
@@ -19,7 +19,7 @@ import sys
 import tempfile
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
-from nextcloud_api import DEFAULT_ENV_FILE, Client, NCError, load_env, _zone  # noqa: E402
+from nextcloud_api import DEFAULT_ENV_FILE, LEGACY_ENV_FILE, Client, NCError, load_env, _zone  # noqa: E402
 
 
 def detect_timezone():
@@ -78,7 +78,7 @@ def save_env(path, values):
     path = os.path.expanduser(path)
     d = os.path.dirname(path) or "."
     os.makedirs(d, mode=0o700, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(prefix=".nextcloud.env.", dir=d)  # mkstemp creates it 0600
+    fd, tmp = tempfile.mkstemp(prefix=".env.nextcloud.", dir=d)  # mkstemp creates it 0600
     try:
         with os.fdopen(fd, "w", encoding="utf-8") as f:
             f.write("# Nextcloud credentials for Hermes Agent. Keep private.\n")
@@ -94,6 +94,9 @@ def save_env(path, values):
             pass
         raise
     print(f"Credentials saved to {path} (mode 600)")
+    if path == DEFAULT_ENV_FILE and os.path.exists(LEGACY_ENV_FILE):
+        os.unlink(LEGACY_ENV_FILE)
+        print(f"Removed old {LEGACY_ENV_FILE}")
 
 
 def ask(prompt, default=""):

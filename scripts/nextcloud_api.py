@@ -40,7 +40,8 @@ except ImportError:  # pragma: no cover - Python 3.8
     ZoneInfo = None
     ZoneInfoNotFoundError = Exception
 
-DEFAULT_ENV_FILE = os.path.expanduser("~/.hermes/nextcloud.env")
+DEFAULT_ENV_FILE = os.path.expanduser("~/.hermes/.env.nextcloud")
+LEGACY_ENV_FILE = os.path.expanduser("~/.hermes/nextcloud.env")  # read if the new one is missing
 ENV_KEYS = (
     "NEXTCLOUD_URL",
     "NEXTCLOUD_USER",
@@ -69,6 +70,8 @@ class NCError(Exception):
 def load_env(path=DEFAULT_ENV_FILE):
     """Read the env file; real environment variables take precedence."""
     env = {}
+    if path == DEFAULT_ENV_FILE and not os.path.exists(path) and os.path.exists(LEGACY_ENV_FILE):
+        path = LEGACY_ENV_FILE
     if path and os.path.exists(path):
         with open(path, encoding="utf-8") as f:
             for line in f:
