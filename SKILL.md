@@ -64,6 +64,7 @@ $NC notes delete --id 12
 
 ## Changing a file or note
 
+- Multi-line text: via stdin, `--content - <<'EOF'` ... `EOF`; no `\n` in quotes.
 - "Add X to my list": `append`, never rewrite.
 - Rewrite: `get`, write new content to a temp file, send with `--content -` (stdin)
   plus the etag from THAT `get` (`--if-match` / `--etag`). Never re-fetch an etag

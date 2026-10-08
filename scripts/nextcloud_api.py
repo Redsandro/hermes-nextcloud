@@ -1930,6 +1930,17 @@ def build_parser():
     return p
 
 
+TEXT_ARGS = ("content", "text", "description", "note")
+
+
+def fix_escaped_newlines(value):
+    """'a\\nb' typed inside shell quotes arrives as a literal backslash-n. If the text
+    has no real newline at all, that was meant as a line break."""
+    if "\n" in value or "\\n" not in value:
+        return value
+    return value.replace("\\r\\n", "\n").replace("\\n", "\n")
+
+
 def dispatch(c, a):
     cmd, s = a.command, getattr(a, "sub", None)
     if cmd == "check":
@@ -2005,6 +2016,10 @@ def dispatch(c, a):
 def main(argv=None):
     parser = build_parser()
     a = parser.parse_args(argv)
+    for name in TEXT_ARGS:  # inline text args only; stdin and files are taken as-is
+        v = getattr(a, name, None)
+        if isinstance(v, str) and v != "-":
+            setattr(a, name, fix_escaped_newlines(v))
     if not a.command:
         parser.print_help()
         return 0
